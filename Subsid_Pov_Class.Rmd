@@ -1,0 +1,302 @@
+---
+title: "Poverty Data - Load And Cleanse"
+author: "Michael Bemus"
+date: "2024-09-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Loading Data
+
+For this project, we will use open-source data from the United States Census Bureau at census.gov. The file is formatted as either a SAS or STATA file. All data related to this file can be found at:
+
+https://www.census.gov/data/datasets/time-series/demo/supplemental-poverty-measure/acs-research-files.html
+
+For our purposes, we will read in the STATA file and complete transformations to use for later steps.
+
+```{r readSTATA}
+# We need to use the "haven" R package to read in our data.
+
+#install.packages("haven")
+library(haven)
+
+# The "read_stata" function will create a tibble data frame from the data.
+df <- read_stata("https://www2.census.gov/programs-surveys/supplemental-poverty-measure/datasets/spm/spm_2022_pu.dta")
+
+head(df)   # View the first 6 rows of the data frame.
+```
+
+For specifics on the endpoints related to this data set, please see the data dictionary found at:
+
+https://www2.census.gov/programs-surveys/supplemental-poverty-measure/datasets/spm/spm-asc-data-dictionary.pdf
+
+## Data Processing
+
+The main data that concerns us for this analysis is the demographic/household data, tax/income data, insurance/healthcare data, and subsidy data. In the followings steps, we will remove and reclassify much of our data to simplify future processes.
+
+#### Create Target Group
+
+First, we need to create our target labels. An observation is classified as "poor" if they fall under either the Federal Poverty Metric or the Supplemental Poverty Metric. An observation is classified as "aid" if they are earning subsidies without but not classified under the "poor" group. And an observation is classified as "no" if they are not impoverished and not earning subsidies.
+
+```{r loadDplyr, include=FALSE}
+library(dplyr)
+```
+
+```{r assignClass}
+df$group[(df$OFFPoor == 1)|
+           (df$SPM_Poor == 1)] <- "poor"
+
+df$group[(df$OFFPoor==0)&
+           (df$SPM_Poor==0)&
+           ((df$SPM_SNAPSub>0)
+            |(df$SPM_CapHouseSub>0)
+            |(df$SPM_SchLunch>0)
+            |(df$SPM_EngVal>0)
+            |(df$SPM_WICval>0))] <- "aid"
+
+df$group[(df$OFFPoor==0)&
+           (df$SPM_Poor==0)&
+           (df$SPM_SNAPSub==0)&
+           (df$SPM_CapHouseSub==0)&
+           (df$SPM_SchLunch==0)&
+           (df$SPM_EngVal==0)&
+           (df$SPM_WICval==0)] <- "no"
+
+table(df$group)
+```
+
+#### Remove Excess Columns
+
+We see that the majority of observations are of non-impoverished, non-subsidy earning individuals. We have about 60% more observations in the aid group than in the impoverished group.
+
+Next, we remove some extra variables that aren't necessary for our analysis.
+
+```{r removeCols}
+# Removing extra columns primarily related to poverty calculations.
+df <- df |>
+  select(-SPM_EquivScale, -wt, -Tax_unit, -SPM_ID, -PUMA, -SPM_NumPer, 
+         -SPM_GeoAdj, -serialno, -FILEDATE, -sporder, -SPM_PovThreshold)
+
+head(df)   # Show new data frame.
+```
+
+#### Rename Columns
+
+Now, with our columns of interest selected, I renamed them to make them a bit easier to use.
+
+```{r previewColNames}
+print(colnames(df))
+```
+
+```{r renameCols}
+colnames(df) <- c("st", "off_pov", "age", "mar", "sex", "edu", "race", 
+                         "hispanic", "agi", "hi_prem", "moop", "spm_pov", 
+                         "num_kid", "num_adlt", "mortgage", "spm_res", 
+                         "spm_inc", "snap", "house_sub", "slunch", "energy", 
+                         "wic", "fed_tax", "fed_tax_bc", "eitc", "fica", 
+                         "st_tax", "cap_xpen", "wk_xpen", "cc_xpen", 
+                         "spm_hi_prem", "med_xpen", "mc_pb", "cohabit", 
+                         "ui_kids", "group")
+
+print(colnames(df))   # Show results of change.
+```
+
+#### Reclassify Categorical Variables
+
+Next, we want to examine some of our categorical variables and redefine them as factors.
+
+```{r loadForcats, include=FALSE}
+library(forcats)
+```
+
+```{r assignFactors}
+# Change Sex from binary to a character factor.
+df$sex <- factor(df$sex)
+levels(df$sex) <- c("M", "F")
+
+# Change Marital Status from numeric to character factor.
+df$mar <- factor(df$mar)
+levels(df$mar) <- c("M", "W", "D", "S", "NM")
+
+# Assign Hispanic as a factor rather than numeric.
+df$hispanic <- factor(df$hispanic)
+
+# Change Race from numeric to character factor.
+df$race <-factor(df$race)
+levels(df$race) <- c("W", "B", "A", "O")
+
+# Change Education Level from numeric to character factor.
+df$edu <- factor(df$edu)
+levels(df$edu) <- c("<25", "<HS", "HS", "<C", "C")
+
+# Assign Official and Supplemental Poverty variables as binary factors.
+df$off_pov <- factor(df$off_pov)
+df$spm_pov <- factor(df$spm_pov)
+
+# Assign Unidentified Kids as a binary factor
+df$ui_kids <- factor(df$ui_kids)
+
+# Change Mortgage from numeric to a character factor.
+df$mortgage <- factor(df$mortgage)
+levels(df$mortgage) <- c("M", "N", "R")
+
+# Change State from numeric to a character factor.
+df$st <- factor(df$st)
+levels(df$st) <- c("AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", 
+                          "FL", "GA", "HI", "ID", "IL", "IN", "IA", "KS", "KY", 
+                          "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", 
+                          "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", 
+                          "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", 
+                          "VT", "VA", "WA", "WV", "WI", "WY")
+
+# Set our variable of interest, Group, to a 3-class factor.
+df$group <- factor(df$group)
+```
+
+Next, we want to remove unnecessary data in our examination. Because the data set already has three million observations, we felt free to remove many high-leverage values that were irregular from the data as a whole.
+
+### Data Filtering
+
+The first change we made was removing individuals younger than 25. This way, we will be dealing with adults who should have unique values for all of our financial variables.
+
+```{r removeChildren}
+# Remove all observations with an age less than 26.
+df <- df |>
+  filter(age > 25)
+
+print(nrow(df))   # Check to see how much data remains.
+```
+
+Next, we need to begin visualizing our data to better understand where outliers may be present.
+
+```{r loadGGPlot, include=FALSE}
+library(ggplot2)
+library(gridExtra)
+```
+
+### Univariate Visualization
+
+#### Income
+
+Income is a fairly simply variable that is easy to begin with.
+
+```{r incomeFullVisualization, echo=FALSE}
+# Create a histogram of Income.
+ggplot(df, aes(x=spm_inc)) + geom_histogram(bins = 36, fill="green") + 
+  labs(title="Income Distribution", x ="Income", y = "Count in Bin")
+```
+
+We see that most observations are within the first three bins, revealing a right skew to the data. Next, we see what happens if we cut off that right tail.
+
+```{r incomeLimitedVisualization, echo=FALSE}
+# Create a histogram of the main body of income's distribution.
+income_zoom <- filter(df, spm_inc < 250000)
+ggplot(income_zoom, aes(x=spm_inc)) + geom_histogram(bins = 24, fill="green") + 
+  labs(title="Limited Income Distribution", x ="Income", y = "Count in Bin")
+```
+
+In this model, we do not see as much fall-off as we would perhaps like for a normal model. To fix this, we could try statistical transformations for our data.
+
+```{r incomeTransformedVisualization, echo=FALSE}
+# Visualization of a Square-Root transformed Income Distribution.
+g1 <- ggplot(df, aes(x=sqrt(spm_inc))) + geom_histogram(bins = 36, fill="darkgreen") + 
+  labs(title="Square Root Income Distribution", x ="Income", y = "Count in Bin")
+
+# Visualization of a Logarithmic transformed Income Distribution.
+g2 <- ggplot(df, aes(x=log(spm_inc+1))) + geom_histogram(bins = 36, fill="olivedrab") + 
+  labs(title="Logarithmic Income Distribution", x ="Income", y = "Count in Bin")
+
+# Visualization of a Cube-Root transformed Income Distribution.
+g3 <- ggplot(df, aes(x=spm_inc^(1/3))) + geom_histogram(bins = 36, fill="seagreen") + 
+  labs(title="Cube Root Income Distribution", x ="Income", y = "Count in Bin")
+
+grid.arrange(g1, g2, g3, nrow=1, top="Income Transformations")
+```
+
+We see that the cube-root does the best job of reducing the skew of our data. The square-root still has quite a bit of skew present, and the logarithm actually goes too far and gives us some left skewing.
+
+However, for our purposes, to reduce some skewing, we will remove all observations with incomes over $1,000,000 per year. Those individuals are earning much more than what an "average observation" would be expected to and are not as useful for our analysis.
+
+#### Tax
+
+Federal Tax is another fairly easy variable that should be fairly similar to income. Its distribution is shown next.
+
+```{r taxFullVisualization}
+ggplot(df, aes(x=fed_tax)) + geom_histogram(bins = 36, fill="firebrick") + 
+  labs(title="Federal Tax Distribution", x ="Tax", y = "Count in Bin")
+```
+
+We see that we are finding observations with negative tax, which might make sense if an individual receives more credits than they pay in actual taxes. however, we have a massive right skew similar to what we saw in the distribution of income. 
+
+In later stages, we will consider only those observations paying less than $100,000 in taxes, which should closer represent the general population.
+
+While I was playing with the data, I found an interesting result relating to the individuals paying greater than $100,000 in taxes.
+
+```{r taxHighValCounts}
+print(paste("Count of Individuals Paying > $100,000 in Federal Taxes:",
+            length(df$fed_tax[(df$fed_tax > 100000)])))
+print(paste("Count of \"No\" Individuals Paying > $100,000 in Federal Taxes:",
+            length(df$fed_tax[(df$fed_tax > 100000)&(df$group == "no")])))
+```
+
+We have more than 10,000 individuals paying more than $100,000 who fall into one of our aid or poverty group. If well examine further, we find the following.
+
+```{r taxHighValCounts}
+print(paste("Count of \"Poor\" Individuals Paying > $100,000 in Federal Taxes:",
+            length(df$fed_tax[(df$fed_tax > 100000)&(df$group == "poor")])))
+print(paste("Count of \"Aid\" Individuals Paying > $100,000 in Federal Taxes:",
+            length(df$fed_tax[(df$fed_tax > 100000)&(df$group == "aid")])))
+```
+
+It is interesting that we see individuals who count as impoverished having to pay more than $100,000 in taxes. If we explore this further...
+
+```{r taxHighValCounts}
+print(paste("Count of Federally Poor Individuals Paying > $100,000 in Federal Taxes:",
+            length(df$fed_tax[(df$fed_tax > 100000)&(df$off_pov == 1)])))
+print(paste("Count of Supplementally Poor Individuals Paying > $100,000 in Federal Taxes:",
+            length(df$fed_tax[(df$fed_tax > 100000)&(df$spm_pov == 1)])))
+```
+
+These observations might need to be examined further to explain why these individuals are impoverished, but having to pay so much in taxes. Is it an error, or is the definition of poverty faulty?
+
+#### Outlier Results
+
+We can do the same with the rest of our numeric variables. In the end, we came up with the following filtering rule to remove unnecessary high-leverage observations from our data.
+
+```{r removeOutliers}
+df <- filter(df, (spm_inc < 1000000)&(snap < 20000)&(house_sub < 30000)&
+               (slunch < 10000)&(energy < 7000)&(wic < 2500)&
+               (wk_xpen < 12500)&(med_xpen < 50000)&(cc_xpen < 10000)&
+               (moop < 20000)&(spm_hi_prem < 30000)&(hi_prem < 30000)&
+               (fed_tax<100000)&(st_tax<70000)&(eitc<75000)&(fica<40000))
+
+nrow(df)
+```
+
+Since most of these rules have to do with financial variables, there is a lot of overlap in the cases that they cover. However, this full transformation should make our sample better reflect the population we are interested in, removing primarily "no-group" observations that we already have plenty of.
+
+### Save Changes
+
+```{r}
+write.csv(df, file="SubsidyClass/dataset.csv")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
