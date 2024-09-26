@@ -203,28 +203,30 @@ In this model, we do not see as much fall-off as we would perhaps like for a nor
 ```{r incomeTransformedVisualization, echo=FALSE}
 # Visualization of a Square-Root transformed Income Distribution.
 g1 <- ggplot(df, aes(x=sqrt(spm_inc))) + geom_histogram(bins = 36, fill="darkgreen") + 
-  labs(title="Square Root Income Distribution", x ="Income", y = "Count in Bin")
+  labs(title="Square Root Income", x ="Income", y = "Count in Bin")
 
 # Visualization of a Logarithmic transformed Income Distribution.
 g2 <- ggplot(df, aes(x=log(spm_inc+1))) + geom_histogram(bins = 36, fill="olivedrab") + 
-  labs(title="Logarithmic Income Distribution", x ="Income", y = "Count in Bin")
+  labs(title="Logarithmic Income", x ="Income", y = "Count in Bin")
 
 # Visualization of a Cube-Root transformed Income Distribution.
 g3 <- ggplot(df, aes(x=spm_inc^(1/3))) + geom_histogram(bins = 36, fill="seagreen") + 
-  labs(title="Cube Root Income Distribution", x ="Income", y = "Count in Bin")
+  labs(title="Cube Root Income", x ="Income", y = "Count in Bin")
 
+# Combine all visualizations into 1 plot.
 grid.arrange(g1, g2, g3, nrow=1, top="Income Transformations")
 ```
 
 We see that the cube-root does the best job of reducing the skew of our data. The square-root still has quite a bit of skew present, and the logarithm actually goes too far and gives us some left skewing.
 
-However, for our purposes, to reduce some skewing, we will remove all observations with incomes over $1,000,000 per year. Those individuals are earning much more than what an "average observation" would be expected to and are not as useful for our analysis.
+However, for our purposes, we want to reduce skewing, so we will prefer data removal over data transformation. Since we are using such a large dataset, there should not be any concerns relating to underfitting our models.
 
 #### Tax
 
 Federal Tax is another fairly easy variable that should be fairly similar to income. Its distribution is shown next.
 
 ```{r taxFullVisualization}
+# Plotting the distribution of our tax variable.
 ggplot(df, aes(x=fed_tax)) + geom_histogram(bins = 36, fill="firebrick") + 
   labs(title="Federal Tax Distribution", x ="Tax", y = "Count in Bin")
 ```
@@ -264,16 +266,49 @@ These observations might need to be examined further to explain why these indivi
 
 #### Outlier Results
 
-We can do the same with the rest of our numeric variables. In the end, we came up with the following filtering rule to remove unnecessary high-leverage observations from our data.
+We can do the same general analysis with all of our numeric variables. However, what we are really looking to do is remove high leverage values to reduce bias in our model. Because of this, we will rely on statistical methods to remove values greater than 3 Standard Deviations from the Mean of our centerpoints.
 
-```{r removeOutliers}
-df <- filter(df, (spm_inc < 1000000)&(snap < 20000)&(house_sub < 30000)&
-               (slunch < 10000)&(energy < 7000)&(wic < 2500)&
-               (wk_xpen < 12500)&(med_xpen < 50000)&(cc_xpen < 10000)&
-               (moop < 20000)&(spm_hi_prem < 30000)&(hi_prem < 30000)&
-               (fed_tax<100000)&(st_tax<70000)&(eitc<75000)&(fica<40000))
+```{r dataTypeCheck}
+# Loop through our columns to print out their data types.
+for (i in (colnames(df))) {
+  print(paste(i, "-", class(df[[i]])))
+}
+```
 
-nrow(df)
+Because all of our variables are either factors or numeric, we can use a simple if statement to find the mean and standard deviations of all of our variables.
+
+```{r dataTypeCheck}
+# Loop through our columns to print out their data types.
+for (i in (colnames(df))) {
+  if(class(df[[i]]) == "numeric") {   # Select only numeric variables.
+    x_bar <- mean(df[[i]])   # Calculate mean of column.
+    x_dev <- sd(df[[i]])   # Calculate standard deviation of column.
+    x_top <- x_bar + 3*x_dev   # Find upper bound of confidence interval.
+    x_bot <- x_bar - 3*x_dev   # Find lower bound of confidence interval.
+    
+    # Print results.
+    print(paste(i, ": ", x_bar, ", ", x_dev, ", ", x_top, ", ", x_bot, sep=""))
+  }
+}
+```
+
+From this list, we will ignore cohabit, num_kid, num_adlt, age, and our subsidy variables. We really want to focus on our earning variables. Additionally, since the bottom of all of our ranges is below 0, which should not be too common in these variables, we will exclusively filter the top ranges.
+
+```{r dataFilter}
+# How much data we had before.
+print(paste("Num Rows Before Filtering:", nrow(df)))
+
+# Filters according to what is shown above.
+df <- df |>
+  filter((df$agi < 430000)&(df$hi_prem < 15000)&(df$moop < 10000)&
+           (df$spm_res < 350000)&(df$spm_inc < 500000)&(df$fed_tax < 100000)&
+           (df$fed_tax_bc < 100000)&(df$eitc < 3300)&(df$fica < 27500)&
+           (df$st_tax < 25000)&(df$cap_xpen < 10500)&(df$wk_xpen < 7000)&
+           (df$cc_xpen < 6500)&(df$spm_hi_prem < 16000)&(df$med_xpen < 27500)&
+           (df$mc_pb < 4000))
+
+# How much data we have after.
+print(paste("Num Rows After Filtering:", nrow(df)))
 ```
 
 Since most of these rules have to do with financial variables, there is a lot of overlap in the cases that they cover. However, this full transformation should make our sample better reflect the population we are interested in, removing primarily "no-group" observations that we already have plenty of.
@@ -283,20 +318,4 @@ Since most of these rules have to do with financial variables, there is a lot of
 ```{r}
 write.csv(df, file="SubsidyClass/dataset.csv")
 ```
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
