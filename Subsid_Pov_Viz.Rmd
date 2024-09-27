@@ -14,7 +14,7 @@ Here, we want to examine some of the trends occurring in the data.
 ### Load Data and Packages
 
 ```{r loadData}
-df <- read.csv("C:/Users/mikeb/OneDrive/Documents/R/SubsidyClassData.csv")
+df <- read.csv("SubsidyClass/dataset.csv")
 ```
 
 ```{r loadLibraries, include=FALSE}
