@@ -1,0 +1,898 @@
+---
+title: "Poverty Data - Principal Components Analysis"
+author: "Michael Bemus"
+date: "2024-10-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This is the first of 3 Methods I am going to try to compare the classes of our data set. Principal components analysis is typically used to leverage the covariance structure of data to redefine new variables from a combination of those in the data set.
+
+For our purposes, we will be creating four sets of Principal Components: 1 using the full data set, 1 using the Poor Group, 1 using the Aid Group, and 1 using the No Group. We will then use a few comparison methods to see how similar each set of components are to each other.
+
+### Load Data and Packages
+
+```{r loadData}
+df <- read.csv("SubsidyClass/dataset.csv")
+```
+
+```{r loadLibraries, include=FALSE}
+library(ggplot2)
+library(dplyr)
+library(forcats)
+library(gridExtra)
+library(corrplot)
+```
+
+First, we can remove a few extra variables that will not be helpful for our Analysis. First, the official and supplemental poverty variables can be removed because they are already represented in our group variable. Additionally, we can remove the State variable because it has too many categories to be very useful.
+
+Also, to avoid bias, we will remove our subsidy variables like slunch and SNAP. These variables were used to define our groups of interest, and for the no group, all values are 0. They would cause errors in our analysis if we kept them, so we must remove them.
+
+```{r removeVars}
+df <- select(df, -X, -st, -off_pov, -spm_pov, -snap, -house_sub, -slunch, 
+             -energy, -wic)   # Remove unnecessary variables.
+```
+
+Next, we know that PCA does not work well with categorical data that has 3 or more classes. Because of this, we need to encode dummy variables so that a correlation structure can be created for our classes.
+
+```{r recodeFactors}
+# Starting with the mar variables. Our categories are:
+#   Divorced
+df$divorced[df$mar == "D"] <- 1
+df$divorced[df$mar != "D"] <- 0
+
+#   Married
+df$married[df$mar == "M"] <- 1
+df$married[df$mar != "M"] <- 0
+
+#   Separated
+df$separated[df$mar == "S"] <- 1
+df$separated[df$mar != "S"] <- 0
+
+#   Widowed
+df$widowed[df$mar == "W"] <- 1
+df$widowed[df$mar != "W"] <- 0
+
+#   And, by default, an observation is Never Married.
+df <- select(df, -mar)
+
+# Next, we create variables for our Mortgage classes.
+#   Owns a property with a Mortgage.
+df$has_mortgage[df$mortgage == "M"] <- 1
+df$has_mortgage[df$mortgage != "M"] <- 0
+
+#   Renting a property.
+df$renting[df$mortgage == "R"] <- 1
+df$renting[df$mortgage != "R"] <- 0
+
+#   By default, an observation owns a property and has no mortgage.
+df <- select(df, -mortgage)
+
+# Next, we look at our education variables. Their classes are
+#   High School degree with some College.
+df$less_college[df$edu == "<C"] <- 1
+df$less_college[df$edu != "<C"] <- 0
+
+#   College degree.
+df$college[df$edu == "C"] <- 1
+df$college[df$edu != "C"] <- 0
+
+#   High School Degree.
+df$highsch[df$edu == "HS"] <- 1
+df$highsch[df$edu != "HS"] <- 0
+
+#   By default, an observation has less than a high school education.
+df <- select(df, -edu)   # Default: <HS
+
+# Next, we look at our sex variable.
+# For our purposes, a 1 represents Female.
+df$sex[df$sex == "F"] <- 1
+# A 0 represents a male.
+df$sex[df$sex == "M"] <- 0
+
+df$sex <- as.integer(df$sex)   # Validate data type.
+
+# Last, we examine our Race Variable. Our classes are:
+#   Asian
+df$race_asian[df$race == "A"] <- 1
+df$race_asian[df$race != "A"] <- 0
+
+#   Black
+df$race_black[df$race == "B"] <- 1
+df$race_black[df$race != "B"] <- 0
+
+#   Other
+df$race_other[df$race == "O"] <- 1
+df$race_other[df$race != "O"] <- 0
+
+#   By default, an observation is white.
+df <- select(df, -race)
+
+# Check the end result of our process.
+head(df)
+```
+
+### Principal Components
+
+Now that we have processed our data, we can create our Principal Components. 
+
+#### Full Data Components
+
+We will start with the full data's set of Principal Components.
+
+```{r fullPCAInitialize}
+# Use the prcomp function from the built-in R Stats library.
+#   The "scale.=TRUE" option assures we are using correlations, not covariances.
+pca_full <- prcomp(select(df, -group), scale.=TRUE)
+
+# View the relative importance of each PC we've created.
+summary(pca_full)
+```
+
+We see that it takes 16 components to explain 80% of the Variance present in our data. To get to 90%, we need 20 Components. Otherwise, we have a total of 35 Components to explain the full variance.
+
+We can visualize the importance of our components using a scree plot.
+
+```{r fullPCAScree}
+library(graphics)
+
+# Use the standard deviations of our model to create a scree plot.
+screeplot(pca_full["sdev"], npcs=35, type="lines")
+```
+
+We see that, after about 7 components, the variance explained by our components really starts to flatten out, before another drop starting at 18 Components. In normal applications of PCA's, we might consider using only the first 4 or 5 Components as a new data set for further analysis.
+
+However, the purpose of our analysis is not to reduce the number of variables. Instead, we want to compare the features of our components. To do this, we will first examine what features are important for our current set of components using a custom function.
+
+```{r importantComponentsFunction}
+# Initialize Function.
+important_components <- function(pc) {
+  # First, we need a threshold we can use to determine if a component is
+  # significant enough to be observed.
+  
+  # We will use (Number of components)^-1 as our threshold.
+  signf <- 1/sqrt(nrow(pc$rotation))
+  # If a variable has a significance greater than signf, we will examine it.
+  
+  # Next, we want to split our data so that we are only looking at components
+  # that contribute the most to explaining 80% of the variance in our data.
+  
+  # 1. Find the Variances of each Component.
+  lambda <- pc$sdev**2
+  
+  # 2. Find what percent of the total variance each Component explains.
+  varPct <- lambda/sum(lambda) * 100
+  
+  # 3. Create a list of cumulative variance explained by combining components.
+  cumvarPct <- cumsum(varPct)
+  
+  # 4. Select indecies of all components contributing to 80% of the Variance. 
+  split80 <- c(1:length(lambda))[cumvarPct == cumvarPct[cumvarPct > 80][1]]
+  
+  # Whenever we run this function, we want to print some basic information.
+  print("-------------------------------")
+  for (i in 1:split80) {   # For each significant variable.
+    
+    # Select the indexes of those variables with significant contribution.
+    signf_ind <- abs(pc$rotation[,i]) > signf
+    # Select the names of those variables.
+    signf_rows <- rownames(pc$rotation)[signf_ind]
+    # Select the values of those variables.
+    signf_vals <- pc$rotation[signf_ind, i]
+    
+    # Principal components allow variables to be positive and negative.
+    # However, to compare significance, we want all values to be positive.
+    signf_abs <- abs(signf_vals)
+    
+    # We create a data frame from the above to simplify a few operations.
+    signf_df <- data.frame("Variable"=signf_rows, 
+                           "Value"=signf_vals, 
+                           "Abs"=signf_abs)
+    
+    # Order our variables based on their contribution to the component.
+    signf_df <- signf_df[order(signf_df$Abs, decreasing=TRUE),]
+    
+    # Print which component number we are on and the variance it explains.
+    print(paste("PC", i, ": ", varPct[i], sep=""))
+    print("")   # Extra space.
+    
+    # Then, for each significant variable, we want to print its value.
+    for (j in 1:nrow(signf_df)) {
+      print(paste(signf_df$Variable[j], ": ", round(signf_df$Value[j],4), 
+                  sep=""))
+    }
+    # Move on to next component.
+    print("-------------------------------")
+  }
+  
+  # Once we've printed everything out, we want to be able to compare our
+  # important components between sets of PCA's.
+  
+  # T/F object storing when variables are significant.
+  is_signf <- abs(pc$rotation[,1:split80]) > signf
+  
+  # Create a data frame to store our outputs.
+  signf_counts <- data.frame()
+  
+  # For each variable...
+  for (i in 1:nrow(pc$rotation)) {
+    signf_count <- sum(is_signf[i,])   # Count the number of times it's flagged.
+    
+    # Add variable to our output data frame.
+    signf_counts <- rbind(signf_counts, 
+                          c(rownames(pc$rotation)[i], signf_count))
+  }
+  # Rename our columns for cleanliness.
+  colnames(signf_counts) <- c("Variable", "Count")
+  signf_counts$Count <- as.integer(signf_counts$Count)   # Data type validation.
+  
+  return(signf_counts)   # Output results data frame.
+}
+```
+
+Now that we have this function, we can use it in our analysis of the full data principal components.
+
+```{r significanceFullPCA}
+sig_full <- important_components(pca_full)
+```
+
+From this output, we can look at each component individually to create a summary of what it represents. For example, the first component appears to contain our tax and income variables, whereas our second begins to account for age and variables important to retirees.
+
+Here, I will not go into a full analysis of our results. However, I will examine the significance counts we also calculated as outputs of our function.
+
+```{r significanceCountsFullPCA}
+sig_full[order(sig_full$Count, decreasing=TRUE),]
+```
+
+We see that, of our 80% Components, hi_prem is used the most frequently. However, this begs the question of whether hi_prem is contributing more or less than other variables to the components it is featured in.
+
+In comparison, agi, spm_res, spm_inc, and fica, st_tax, and mc_pb are used the least. It appears that most of their variance is explained by the first two components, which means they are not required for the other components.
+
+#### Aid Data Components
+
+Next, we will repeat this analysis for the variables in our aid group.
+
+```{r aidPCAInitialize}
+# Define our components as before, selecting only aid group observations.
+pca_aid <- prcomp(select(filter(df, group == "aid"), -group), scale.=TRUE)
+
+# View the relative importance of our new components.
+summary(pca_aid)
+```
+
+We see that our first component here has a slightly smaller standard deviation than it had in our first set. It still takes 16 components to explain 80% of the variance and 20 componens to explain 90%. However, our 20th component brings our cumulative variance proportion to about 91%, whereas it was 90% earlier. With this smaller sample, we see that there is a wider spread of the variance across variables.
+
+```{r aidPCAScree}
+# Visualizing the above results.
+screeplot(pca_aid["sdev"], npcs=35, type="lines")
+```
+
+The scree plot shown here is very similar to what we saw with the full data. There are likely only small changes of degree rather than total structural changes in the overall correlation structure.
+
+Next, we will use our function to analyze the components.
+
+```{r significanceAidPCA}
+sig_aid <- important_components(pca_aid)
+```
+
+Our first component appears very similar to the first component of the full data as far as variables involved is concerned. However, the second component does not have mc_pb labeled as significant, instead incorporating other demographic variables such as hispanic. Looking one further, our third variable appears to contain many of our medical expense variables, as well as some details about family size.
+
+```{r significanceCountsAidPCA}
+sig_aid[order(sig_aid$Count, decreasing=TRUE),]
+```
+
+In our new data set, we see that hi_prem is used half as frequently, suggesting its variance is explained somewhat faster. Now, our most frequent variables are widowed and race_black. It might be interesting to see if those two variables are at all correlated. Once again, a lot of our financial variables are only used once. Here, though, it appears med_xpen has replaced mc_pb. Instead of being explaining in the second component like mc_pb, med_xpen appears to explained by the third component.
+
+#### Poor Data Components
+
+Next, we move onto the components for the variables of the poor group.
+
+```{r poorPCAInitialize}
+# Define our components as before, selecting only poor group observations.
+pca_poor <- prcomp(select(filter(df, group == "poor"), -group), scale.=TRUE)
+
+# View the relative importance of our new components.
+summary(pca_poor)
+```
+
+We see another dip in the significance of our first component. For our poor components, the drop seems to be somewhat larger than what it was for the poor group. 
+
+This drop is also reflected in our cumulative variance proportions. It now takes 17 components to explain 80% of the variance and 21 components to explain 90% of the variance. Whether this is due to a reduced sample size or an actual change in variance structure is yet to be seen. If we were to take a balanced sample of data, we could explore this further.
+
+```{r poorPCAScree}
+# Visualizing the above results.
+screeplot(pca_poor["sdev"], npcs=35, type="lines")
+```
+
+We see a very interesting shift in correlation structure on the scree plot for the poor group. The second and third components appear to have very similar quantities of variance explained. If we compare this to our earlier components, we see that the third component has a standard deviation of only about 0.15 more. However, the 4th component is still about the same in terms of standard deviation, so it appears to be a much larger gap down to it.
+
+If we were to select a number of components from this model, we might recommend up to 9 components. The correlation structure shown here is not nearly as smooth as what we saw earlier.
+
+
+
+Next, we will use our function to analyze the components.
+
+```{r significancePoorPCA}
+sig_poor <- important_components(pca_poor)
+```
+
+Examining the significant variables in our components, we still see that the first component is largely composed of financial variables like income and taxes. However, we have a few additional household demographic variables concerning the number of adults in a home marked as significant, and wk_xpen seems more important than it has previously.
+
+For our second component, we see a mix of medical and tax variables, which is slightly different than what we have seen before. For our third component, we have a real mix of medical and demographic variables that are somewhat difficult to interpret.
+
+```{r significanceCountsPoorPCA}
+sig_poor[order(sig_poor$Count, decreasing=TRUE),]
+```
+
+If we look at how frequently each component is used, we see that race_black is significant in the most components. In comparison to earlier, we have only four variables that are significant only once, those being spm_res, spm_inc, eitc, and fica. It seems that regardless of class, income is the most important variable for explaining the variance in our data.
+
+#### No Data Components
+
+Finally, we will repeat this analysis for the variables in our no group. We will expect this group to be very similar to the full group because it composes the greatest portion of our data set.
+
+```{r noPCAInitialize}
+# Define our components as before, selecting only no group observations.
+pca_no <- prcomp(select(filter(df, group == "no"), -group), scale.=TRUE)
+
+# View the relative importance of our new components.
+summary(pca_no)
+```
+
+As expected, our values here appear very similar to the full data. It takes 16 components to explain 80% of the variance and 20 components to explain 90%.
+
+
+```{r noPCAScree}
+# Visualizing the above results.
+screeplot(pca_no["sdev"], npcs=35, type="lines")
+```
+
+Again, this scree plot matches very closely with the initial full-data scree plot. Of our three classes, the Poor group is the only class to break this general mold.
+
+Next, we will use our function to analyze the components.
+
+```{r significanceNoPCA}
+sig_no <- important_components(pca_no)
+```
+
+Once again, our first component seems primarily concerned with our income and tax variables. And  we also see that mc_pb is important to our second component. The third component appears to be composed of specific life expenses like medical costs, marriage, and college. The specific significance values for the third component seem somewhat different to what they were in the full data, but the variables themselves are close to the same.
+
+```{r significanceCountsNoPCA}
+sig_no[order(sig_no$Count, decreasing=TRUE),]
+```
+
+Interestingly, we do see a difference in the counts of significant variables. For this model, childcare expenses are the most frequently significant variable in our components, which might suggest it has strong correlations with many other variables.
+
+Also, we see that we have only 4 variables that are used just once. spm_res, spm_inc, fica, and st_tax are all significant once in our first variable. This is a strange result because the aid model had almost the same six variables which were used only once as the full model, but this larger group that we would expect to be more similar to the full data only has 4. 
+
+### Comparison
+
+To begin our comparison, we are going to take a side-by-side look at which variables are important to our different models. To simplify our outputs, we will only consider the first 16 Principal Components of our models.
+
+```{r significantVariablesPrintList}
+# Reassign signf (in case of import to a different file)
+signf <- 1/sqrt(nrow(pca_full$rotation))
+
+# Start printing out values.
+print("--------------------------------------------------------------------")
+for (i in 1:16) {
+  # For each component, we will basically concatenate what we would have output
+  # from our earlier function. To do this, we first need to recalculate
+  # everything from the earlier components.
+  
+  #   1. Select which variables are significant.
+  aid_signf <- abs(pca_aid$rotation[,i]) > signf
+  
+  #   2. Find their variable names.
+  aid_rows <- rownames(pca_aid$rotation)[aid_signf]
+  
+  #   3. Get their absolute values.
+  aid_abs <- abs(pca_aid$rotation[aid_signf, i])
+  
+  #   4. Sort the variable names in order of significance.
+  aid_rows <- aid_rows[order(aid_abs, decreasing=TRUE)]
+  
+  #   5. Count the number of variables used.
+  aid_length <- length(aid_rows)
+  
+  # Repeat the above for the no group.
+  no_signf <- abs(pca_no$rotation[,i]) > signf
+  no_rows <- rownames(pca_no$rotation)[no_signf]
+  no_abs <- abs(pca_no$rotation[no_signf, i])
+  no_rows <- no_rows[order(no_abs, decreasing=TRUE)]
+  no_length <- length(no_rows)
+  
+  # Repeat the above for the poor group.
+  poor_signf <- abs(pca_poor$rotation[,i]) > signf
+  poor_rows <- rownames(pca_poor$rotation)[poor_signf]
+  poor_abs <- abs(pca_poor$rotation[poor_signf, i])
+  poor_rows <- poor_rows[order(poor_abs, decreasing=TRUE)]
+  poor_length <- length(poor_rows)
+  
+  # Repeat the above or the full data.
+  full_signf <- abs(pca_full$rotation[,i]) > signf
+  full_rows <- rownames(pca_full$rotation)[full_signf]
+  full_abs <- abs(pca_full$rotation[full_signf, i])
+  full_rows <- full_rows[order(full_abs, decreasing=TRUE)]
+  full_length <- length(full_rows)
+  
+  # We need to know the maximum number of variables used in each component.
+  max_length <- max(c(aid_length, no_length, poor_length, full_length))
+  
+  # Append NAs until the each variable list is the same length.
+  #   The Aid Group.
+  while (length(aid_rows) < max_length) {
+    aid_rows <- append(aid_rows, NA)
+  }
+  #   The No Group.
+  while (length(no_rows) < max_length) {
+    no_rows <- append(no_rows, NA)
+  }
+  #   The Poor Group.
+  while (length(poor_rows) < max_length) {
+    poor_rows <- append(poor_rows, NA)
+  }
+  #   The Full Data
+  while (length(full_rows) < max_length) {
+    full_rows <- append(full_rows, NA)
+  }
+  
+  # Concatenate our variable lists into a data frame.
+  #   Columns represent groups. Rows are sorted significant variables..
+  out_df <- cbind(aid_rows, no_rows, poor_rows, full_rows)
+  
+  print(paste(" PC", i, sep=""))   # Output component number.
+  print(out_df)   # Print the results.
+  # Move on to the next component.
+  print("--------------------------------------------------------------------")
+}
+```
+
+This method is a bit messy for comparing our models. However, it can provide us with a few quick insights. For example, our first component's most significant variable is spm_inc for all models. For the third component, the Poor group relies on noticeably more variables than the other groups. In the ninth component, all groups except the Aid Group have widowed as the most important variable.
+
+The above lists can help us describe how general similarities are presented in our data and makes it easy to single out which groups are not following the trends of the others.
+
+We can also compare our components visually by recreating our scree plots from earlier.
+
+```{r pcaScreeComparison}
+# Our basic approach is going to be to concatenate the rows of data frames
+# containing data extracted from our principal components.
+
+# From each, we will extract:
+#   1. The Index of each Component (a list from 1 to 35)
+#   2. The Variance expained by that Component.
+#   3. Which Model the Component comes from (full, aid, poor, no)
+
+aid_scree <- data.frame("pcs"=1:length(pca_aid$sdev), 
+                        "scree"=pca_aid$sdev**2, 
+                        "group"=rep("aid", length(pca_aid$sdev)))
+
+no_scree <- data.frame("pcs"=1:length(pca_no$sdev), 
+                       "scree"=pca_no$sdev**2, 
+                       "group"=rep("no", length(pca_no$sdev)))
+
+poor_scree <- data.frame("pcs"=1:length(pca_poor$sdev), 
+                         "scree"=pca_poor$sdev**2, 
+                         "group"=rep("poor", length(pca_poor$sdev)))
+
+full_scree <- data.frame("pcs"=1:length(pca_full$sdev), 
+                         "scree"=pca_full$sdev**2, 
+                         "group"=rep("full", length(pca_full$sdev)))
+
+# Now, we can concatenate our data frames into 1 model.
+sum_scree <- rbind(aid_scree, no_scree, poor_scree, full_scree)
+
+# Finally, we can very easily create a scree plot in ggplot2.
+ggplot(sum_scree, aes(x=pcs, y=scree, color=group, shape=group)) + 
+  geom_line() + 
+  geom_point() + 
+  labs(title="Scree Plot", x="Number of Components", y="Variance Explained") + 
+  scale_x_continuous(breaks = seq(0, 36, by = 4)) + 
+  scale_y_continuous(breaks = seq(0, 8, by = 1))
+```
+
+With all of these put together, it is very easy to see that the main difference between the scree plots of our models is the poor group's variance explained by the first and third components. The first explains less and the third explains more. On the back half of our components, we see that the poor group has variance explained values slightly above the other in a few places, and at 18 components, there is some discrepancy in the aid group. Generally, though, these models do seem to follow a similar shape of variance explanation.
+
+Next, we will try a few quantitative metrics to compare our components as vectors.
+
+#### Significance Matching
+
+Our first approach attempts to take the above lists of significant variables by component and count how frequently the models come to the same results. We will use two methods to do this: general matching and perfect matching. Under general matching, we will count how frequently variables are significant in the same component. Under perfect matching, we will cound how frequently a significant variable is of the same rank of importance (ie most important, second most important, etc) within the same components of different models.
+
+```{r pcaMatchingTechnique}
+# Again redefining signf for this chunk.
+signf <- 1/sqrt(nrow(pca_full$rotation))
+
+# A few sum variables that we want to track for final outputs.
+#   Variables to store the total number of components.
+total_comp_aid <- 0   # Total num components for the aid model.
+total_comp_no <- 0   # Total num components for the no model.
+total_comp_poor <- 0   # Total num components for the poor model.
+total_comp_full <- 0   # Total num components for the full model.
+
+#   Variables to store General and Perfect matches.
+an_abs_m <- 0   # Perfect matches between aid and no.
+an_ttl_m <- 0   # Component matches between aid and no.
+
+ap_abs_m <- 0   # Perfect matches between aid and poor.
+ap_ttl_m <- 0   # Component matches between aid and poor.
+
+af_abs_m <- 0   # Perfect matches between aid and full.
+af_ttl_m <- 0   # Component matches between aid and full.
+
+np_abs_m <- 0   # Perfect matches between no and poor.
+np_ttl_m <- 0   # Component matches between no and poor.
+
+nf_abs_m <- 0   # Perfect matches between no and full.
+nf_ttl_m <- 0   # Component matches between no and full.
+
+pf_abs_m <- 0   # Perfect matches between poor and full.
+pf_ttl_m <- 0   # Component matches between poor and full.
+
+for (i in 1:35) {   # For each component.
+  
+  # "It might have been smart to make this a function."
+  # Very similar to the listing process earlier. 
+  # The following gets the significant variables from each component.
+  
+  #   Aid Model.
+  aid_signf <- abs(pca_aid$rotation[,i]) > signf
+  aid_rows <- rownames(pca_aid$rotation)[aid_signf]
+  aid_abs <- abs(pca_aid$rotation[aid_signf, i])
+  aid_rows <- aid_rows[order(aid_abs, decreasing=TRUE)]
+  aid_length <- length(aid_rows)
+  
+  #   No Model.
+  no_signf <- abs(pca_no$rotation[,i]) > signf
+  no_rows <- rownames(pca_no$rotation)[no_signf]
+  no_abs <- abs(pca_no$rotation[no_signf, i])
+  no_rows <- no_rows[order(no_abs, decreasing=TRUE)]
+  no_length <- length(no_rows)
+  
+  #   Poor Model.
+  poor_signf <- abs(pca_poor$rotation[,i]) > signf
+  poor_rows <- rownames(pca_poor$rotation)[poor_signf]
+  poor_abs <- abs(pca_poor$rotation[poor_signf, i])
+  poor_rows <- poor_rows[order(poor_abs, decreasing=TRUE)]
+  poor_length <- length(poor_rows)
+  
+  #   Full Model.
+  full_signf <- abs(pca_full$rotation[,i]) > signf
+  full_rows <- rownames(pca_full$rotation)[full_signf]
+  full_abs <- abs(pca_full$rotation[full_signf, i])
+  full_rows <- full_rows[order(full_abs, decreasing=TRUE)]
+  full_length <- length(full_rows)
+  
+  # We need to incorporate NA's again for the perfect matching algorthim.
+  #   Find the most variables used in any model for this component..
+  max_length <- max(c(aid_length, no_length, poor_length, full_length))
+  
+  # Verify that all vectors are of the same length.
+  #   Aid Vector.
+  while (length(aid_rows) < max_length) {
+    aid_rows <- append(aid_rows, NA)
+  }
+  #   No Vector.
+  while (length(no_rows) < max_length) {
+    no_rows <- append(no_rows, NA)
+  }
+  #   Poor Vector.
+  while (length(poor_rows) < max_length) {
+    poor_rows <- append(poor_rows, NA)
+  }
+  #   Full Vector.
+  while (length(full_rows) < max_length) {
+    full_rows <- append(full_rows, NA)
+  }
+  
+  # Combine all of our vectors into columns of a data frame.
+  out_df <- cbind(aid_rows, no_rows, poor_rows, full_rows)
+  colnames(out_df) <- c("aid", "no", "poor", "full")   # Clean the column names.
+  out_df <- data.frame(out_df)   # Establish a full data frame.
+  
+  # Count the total number of components that have been used in each model.
+  total_comp_aid <- total_comp_aid + aid_length
+  total_comp_no <- total_comp_no + no_length
+  total_comp_poor <- total_comp_poor + poor_length
+  total_comp_full <- total_comp_full + full_length
+  
+  # Count how many matches exist among components.
+  #   For each variable marked as Significant...
+  for (j in 1:max_length) {
+    # We're really using a bunch of if statements to enable counting.
+    # First, we check if the values are all not NA's.
+    #  Then we see if their values are equal (Perfect)
+    #  or if 1 value is %in% the other column (General).
+    
+    
+    # Perfect matches  
+    #   Aid and No
+    if ((out_df$aid[j] == out_df$no[j])&
+        (is.na(out_df$aid[j]) == FALSE)&(is.na(out_df$no[j]) == FALSE)) {
+      an_abs_m <- an_abs_m + 1
+    }
+    #   Aid and Poor
+    if ((out_df$aid[j] == out_df$poor[j])&
+        (is.na(out_df$aid[j]) == FALSE)&(is.na(out_df$poor[j]) == FALSE)) {
+      ap_abs_m <- ap_abs_m + 1
+    }
+    #   Aid and full
+    if ((out_df$aid[j] == out_df$full[j])&
+        (is.na(out_df$aid[j]) == FALSE)&(is.na(out_df$full[j]) == FALSE)) {
+      af_abs_m <- af_abs_m + 1
+    }
+    #   No and Poor
+    if ((out_df$no[j] == out_df$poor[j])&
+        (is.na(out_df$no[j]) == FALSE)&(is.na(out_df$poor[j]) == FALSE)) {
+      np_abs_m <- np_abs_m + 1
+    }
+    #   No and full
+    if ((out_df$no[j] == out_df$full[j])&
+        (is.na(out_df$no[j]) == FALSE)&(is.na(out_df$full[j]) == FALSE)) {
+      nf_abs_m <- nf_abs_m + 1
+    }
+    #   Poor and full
+    if ((out_df$poor[j] == out_df$full[j])&
+        (is.na(out_df$poor[j]) == FALSE)&(is.na(out_df$full[j]) == FALSE)) {
+      pf_abs_m <- pf_abs_m + 1
+    }
+    
+    
+    # Component Matches
+    #   Aid and No
+    if ((is.na(out_df$aid[j]) == FALSE)&(is.na(out_df$no[j]) == FALSE)&
+      (out_df$aid[j] %in% out_df$no)) {
+      an_ttl_m <- an_ttl_m + 1
+    }
+    #   Aid and Poor
+    if ((is.na(out_df$aid[j]) == FALSE)&(is.na(out_df$poor[j]) == FALSE)&
+        (out_df$aid[j] %in% out_df$poor)) {
+      ap_ttl_m <- ap_ttl_m + 1
+    }
+    #   Aid and full
+    if ((is.na(out_df$aid[j]) == FALSE)&(is.na(out_df$full[j]) == FALSE)&
+        (out_df$aid[j] %in% out_df$full)) {
+      af_ttl_m <- af_ttl_m + 1
+    }
+    #   No and Poor
+    if ((is.na(out_df$no[j]) == FALSE)&(is.na(out_df$poor[j]) == FALSE)&
+        (out_df$no[j] %in% out_df$poor)) {
+      np_ttl_m <- np_ttl_m + 1
+    }
+    #   No and full
+    if ((is.na(out_df$no[j]) == FALSE)&(is.na(out_df$full[j]) == FALSE)&
+        (out_df$no[j] %in% out_df$full)) {
+      nf_ttl_m <- nf_ttl_m + 1
+    }
+    #   Poor and full
+    if ((is.na(out_df$poor[j]) == FALSE)&(is.na(out_df$full[j]) == FALSE)&
+        (out_df$poor[j] %in% out_df$full)) {
+      pf_ttl_m <- pf_ttl_m + 1
+    }
+  }
+}
+
+# Here are a bunch of print statements to show our results.
+print(paste("Num Componets in Aid:", total_comp_aid))
+print(paste("Num Componets in No:", total_comp_no))
+print(paste("Num Componets in Poor:", total_comp_poor))
+print(paste("Num Componets in full:", total_comp_full))
+print("")
+print(paste("Num Perfect Matches (Aid & No):", an_abs_m))
+print(paste("Num Component Matches (Aid & No):", an_ttl_m))
+print("")
+print(paste("Num Perfect Matches (Aid & Poor):", ap_abs_m))
+print(paste("Num Component Matches (Aid & Poor):", ap_ttl_m))
+print("")
+print(paste("Num Perfect Matches (Aid & Full):", af_abs_m))
+print(paste("Num Component Matches (Aid & Full):", af_ttl_m))
+print("")
+print(paste("Num Perfect Matches (No & Poor):", np_abs_m))
+print(paste("Num Component Matches (No & Poor):", np_ttl_m))
+print("")
+print(paste("Num Perfect Matches (No & Full):", nf_abs_m))
+print(paste("Num Component Matches (No & Full):", nf_ttl_m))
+print("")
+print(paste("Num Perfect Matches (Poor & Full):", pf_abs_m))
+print(paste("Num Component Matches (Poor & Full):", pf_ttl_m))
+```
+
+Unsurprisingly, we see the most matches of both kinds between the No group and the Full Group. As far as the Aid group is concerned, it has more matches with the No group than with the Poor group, suggesting those classes are more similar.
+
+Next, we will assign a "score" to each using the number of matches and the number of total components used by each model.
+
+```{r pcaMatchingScore}
+# For our perfect values, we will define a percentage score by dividing the
+# number of perfect matches by the average number of components between the
+# two models.
+print("Perfect Scores")
+print(paste("-  Aid & No:", an_abs_m/((total_comp_aid+total_comp_no)/2)))
+print(paste("-  Aid & Poor:", ap_abs_m/((total_comp_aid+total_comp_poor)/2)))
+print(paste("-  Aid & Full:", af_abs_m/((total_comp_aid+total_comp_full)/2)))
+print(paste("-  No & Poor:", np_abs_m/((total_comp_no+total_comp_poor)/2)))
+print(paste("-  No & Full:", nf_abs_m/((total_comp_no+total_comp_full)/2)))
+print(paste("-  Poor & Full:", pf_abs_m/((total_comp_poor+total_comp_full)/2)))
+print("")
+
+# We then do the same for our general values.
+print("Component Scores")
+print(paste("-  Aid & No:", an_ttl_m/((total_comp_aid+total_comp_no)/2)))
+print(paste("-  Aid & Poor:", ap_ttl_m/((total_comp_aid+total_comp_poor)/2)))
+print(paste("-  Aid & Full:", af_ttl_m/((total_comp_aid+total_comp_full)/2)))
+print(paste("-  No & Poor:", np_ttl_m/((total_comp_no+total_comp_poor)/2)))
+print(paste("-  No & Full:", nf_ttl_m/((total_comp_no+total_comp_full)/2)))
+print(paste("-  Poor & Full:", pf_ttl_m/((total_comp_poor+total_comp_full)/2)))
+
+```
+
+For our Perfect matches, we see the Aid Group and No Groups are both most similar to the Full Group, while the Full Group itself is most similar to the No Group. Interestingly, the Poor Group is most similar to the Aid Group under the Perfect metric, suggesting there may still be some connection between the two classes.
+
+For our General matches, we actually see the exact same results. It makes sense. We would expect more perfect matches to exist when variables align between components. It is interesting to see that the No and Full groups agree on which variables are the most Significant almost 70% of the time. The Poor Group has a much weaker connection to the other classes than they have with each other. At this stage, the Aid Group does not seem as similar to the Poor Group as it is to the No Group.
+
+While this is a very simple way of comparing our models, it isn't the most mathematically rigorous. The difference in variable counts between components makes it so that this metric almost penalizes having many significant variables for a single component. It is a good first examination that is easier to interpret, but a more mathematical method could provide a more concrete truth.
+
+#### Cosine Similarity
+
+```{r, include=FALSE}
+#install.packages("lsa")
+library(lsa)
+```
+
+Our other method for comparing these components is going to be by utilizing cosine similarities. These will allow us to use the full components to compare the "directions" of our vectors.
+
+At first, we will use two cosine similarities: Standard and Absolute. The only difference will be that we will use the absolute value of all components for the Absolute Cosine Similarity. Our reason for doing so is that we want to measure the similarity between the strengths of each variable's contribution. Signs for Principal Components are generally used only to maintain the matrix used in defining the components. 
+
+```{r pcaCosineComp}
+cos_df <- data.frame()   # Create an object to store our cosine values in.
+
+# For each Component...
+for (i in 1:35) {
+  # Store the component.
+  a_pc <- pca_aid$rotation[,i]
+  n_pc <- pca_no$rotation[,i]
+  p_pc <- pca_poor$rotation[,i]
+  f_pc <- pca_full$rotation[,i]
+  
+  # Create a vector of cosine similarities within each pairing.
+  cos_vec <- c(cosine(a_pc, n_pc), cosine(a_pc, p_pc), cosine(a_pc, f_pc), 
+               cosine(n_pc, p_pc), cosine(n_pc, f_pc), cosine(p_pc, f_pc),
+               cosine(abs(a_pc), abs(n_pc)), cosine(abs(a_pc), abs(p_pc)), 
+               cosine(abs(a_pc), abs(f_pc)), cosine(abs(n_pc), abs(p_pc)), 
+               cosine(abs(n_pc), abs(f_pc)), cosine(abs(p_pc), abs(f_pc)))
+  
+  # Concatenate cosine pairings to storage data frame.
+  cos_df <- rbind(cos_df, cos_vec)
+}
+
+# Rename the columns of our data frame for convenience.
+colnames(cos_df) <- c("an", "ap", "af", "np", "nf", "pf", 
+                      "ab_an", "ab_ap", "ab_af", "ab_np", "ab_nf", "ab_pf")
+
+# Print the mean result of both the Normal Cosine and Absolute Cosine.
+print("Basic")
+print(paste("Aid-No Mean Cosine Similarty:", mean(cos_df$an)))
+print(paste("Aid-Poor Mean Cosine Similarty:", mean(cos_df$ap)))
+print(paste("Aid-full Mean Cosine Similarty:", mean(cos_df$af)))
+print(paste("No-Poor Mean Cosine Similarty:", mean(cos_df$np)))
+print(paste("No-full Mean Cosine Similarty:", mean(cos_df$nf)))
+print(paste("Poor-full Mean Cosine Similarty:", mean(cos_df$pf)))
+print("")
+print("Absolute")
+print(paste("Aid-No Mean Cosine Similarty:", mean(cos_df$ab_an)))
+print(paste("Aid-Poor Mean Cosine Similarty:", mean(cos_df$ab_ap)))
+print(paste("Aid-full Mean Cosine Similarty:", mean(cos_df$ab_af)))
+print(paste("No-Poor Mean Cosine Similarty:", mean(cos_df$ab_np)))
+print(paste("No-full Mean Cosine Similarty:", mean(cos_df$ab_nf)))
+print(paste("Poor-full Mean Cosine Similarty:", mean(cos_df$ab_pf)))
+```
+
+Interestingly, we see that the strongest cosine similarity of the standard measure is actually a negative association between the No and Full Models. As far as magnitude is concerned, we see that the Poor Group is relatively unrelated to the other Classes for the standard measure. This continues to support the theory that the aid group is not more similar to the poor group.
+
+For the absolute cosine metric, we see very similar results of different scale. It is interesting to see an almost 90% Cosine Similarity between the No and Full Models, but we have not gained much more information from this transformation.
+
+As one final test, we will look at a weighted cosine similarity of our data. Instead of having each component pairing contribute equally to the mean of cosine similarities, each cosine score will contribute the average of its variance explanation between the models it is comparing. In theory, since these values should add up to 1, this is still a valid way to treat our means.
+
+```{r pcaWCosineComp}
+# Create an empty vector to store our weighted cosine scores in.
+wcos_vec <- rep(0, 12)
+
+# For each class, we first calculate the variances explained by our components.
+# Then, we scale that to a percent of the total variance explained by all.
+#   Aid Group.
+a_lam <- pca_aid$sdev ^ 2
+a_vpct <- a_lam/sum(a_lam)
+#   No Group.
+n_lam <- pca_no$sdev ^ 2
+n_vpct <- n_lam/sum(n_lam)
+#   Poor Group.
+p_lam <- pca_poor$sdev ^ 2
+p_vpct <- p_lam/sum(p_lam)
+#   Full Group.
+f_lam <- pca_full$sdev ^ 2
+f_vpct <- f_lam/sum(f_lam)
+
+# For each Component...
+for (i in 1:35) {
+  # Store the vector of Variables.
+  a_pc <- pca_aid$rotation[,i]
+  n_pc <- pca_no$rotation[,i]
+  p_pc <- pca_poor$rotation[,i]
+  f_pc <- pca_full$rotation[,i]
+  
+  # Calculate cosine similarities using the Absolute method.
+  #   We believe the Absolute Method makes the most logical sense.
+  an_cos <- cosine(abs(a_pc), abs(n_pc))
+  ap_cos <- cosine(abs(a_pc), abs(p_pc))
+  af_cos <- cosine(abs(a_pc), abs(f_pc))
+  np_cos <- cosine(abs(n_pc), abs(p_pc))
+  nf_cos <- cosine(abs(n_pc), abs(f_pc))
+  pf_cos <- cosine(abs(p_pc), abs(f_pc))
+  
+  # Add our scaled values to the cosine vector.
+  #   We have scales for both contribution percents so we can average them
+  #   to get a final score.
+  
+  #   Aid with No.
+  wcos_vec[1] <- wcos_vec[1] + an_cos*a_vpct[i]
+  wcos_vec[2] <- wcos_vec[2] + an_cos*n_vpct[i]
+  #   Aid with Poor.
+  wcos_vec[3] <- wcos_vec[3] + ap_cos*a_vpct[i]
+  wcos_vec[4] <- wcos_vec[4] + ap_cos*p_vpct[i]
+  #   Aid with Full.
+  wcos_vec[5] <- wcos_vec[5] + af_cos*a_vpct[i]
+  wcos_vec[6] <- wcos_vec[6] + af_cos*f_vpct[i]
+  #   No with Poor.
+  wcos_vec[7] <- wcos_vec[7] + np_cos*n_vpct[i]
+  wcos_vec[8] <- wcos_vec[8] + np_cos*p_vpct[i]
+  #   No with Full.
+  wcos_vec[9] <- wcos_vec[9] + nf_cos*n_vpct[i]
+  wcos_vec[10] <- wcos_vec[10] + nf_cos*f_vpct[i]
+  #   Poor with Full.
+  wcos_vec[11] <- wcos_vec[11] + pf_cos*p_vpct[i]
+  wcos_vec[12] <- wcos_vec[12] + pf_cos*f_vpct[i]
+}
+
+# Print out the means of our two weighted similarity scores for each pairing.
+print("Weigthed Cosine Similarity")
+print(paste("Aid-No Mean Cosine Similarty:", mean(wcos_vec[1:2])))
+print(paste("Aid-Poor Mean Cosine Similarty:", mean(wcos_vec[3:4])))
+print(paste("Aid-full Mean Cosine Similarty:", mean(wcos_vec[5:6])))
+print(paste("No-Poor Mean Cosine Similarty:", mean(wcos_vec[7:8])))
+print(paste("No-full Mean Cosine Similarty:", mean(wcos_vec[9:10])))
+print(paste("Poor-full Mean Cosine Similarty:", mean(wcos_vec[11:12])))
+```
+
+Under this weighted model, we actually see that our Models are not as different as what our other metrics would suggest. We still see that the No and Full Models are the most similar, but now, all of our scores are above 70%. The lowest score shown here is actually the score between the Aid group and the Poor Group. This seems very suggestive that they are not similar enough to justify being called "the same." And as a last note, it is interesting how similar the scores for the No-Poor and Poor-Full comparisons are. 
+
+As a final way of using these Principal components, we will attempt to graphically represent the similarities between our three primary interest Groups. We will use the absolute comparisons for this example.
+
+```{r pcaCosGraph}
+# Create a data frame of values.
+#   Component: Which number of component is it?
+#   Match: Which pairing is it?
+#   Cosine: What is the value?
+grph_cos <- data.frame("Component" = rep(1:35, 3), 
+                       "Match"=c(rep("Aid-No", 35), rep("Aid-Poor", 35), 
+                                 rep("No-Poor", 35)),
+                       "Cosine" = c(cos_df$ab_an, cos_df$ab_ap, 
+                                    cos_df$ab_np))
+
+# Graph our data.
+ggplot(grph_cos, aes(x=Component, y=Cosine, color=Match, shape=Match)) + 
+  geom_point() + geom_line(alpha=0.5) + 
+  labs(title="Absolute PC Cosine Similarity") + 
+  scale_x_continuous(breaks = seq(0, 36, by = 4)) 
+```
+
+This is a somewhat messy visualization, but it does show how frequently the Aid and No classes are the most similar of our Groups. It is interesting how many spikes are present in this visualization. It almost looks like the predicted values of a cyclical time series model.
+
+
+
+
+
+
+
+
+
