@@ -1,0 +1,392 @@
+---
+title: "Poverty Data - Discriminant Analysis"
+author: "Michael Bemus"
+date: "2024-10-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This is the second method we are going to use to answer whether the Aid Group is more similar to the Poverty group or the Non-Impoverished Group. Discriminant Analysis is a classification method that attempts to create linear or quadratic decision barriers to determine whether an observation should fall under a given class. For our purposes, we are interested in constructing confusion matrices using discriminant models to see the trends in how misclassifications occur. If two groups are similar, we would expect to see more misclassification between the two groups.
+
+### Load Data
+
+```{r loadData}
+df <- read.csv("SubsidyClass/dataset.csv")
+```
+
+```{r, include=FALSE}
+library(ggplot2)
+library(MASS)
+library(rstatix)
+library(forcats)
+library(gridExtra)
+library(dplyr)
+```
+
+For this analysis, we want to drop columns like our poverty and subsidy variables because they are part of what define our target groups. We will also drop the state column because it can be challenging to interpret.
+
+```{r removeVars}
+df <- select(df, -X, -st, -off_pov, -spm_pov, -snap, -house_sub, -slunch, 
+             -energy, -wic)   # Remove unnecessary variables.
+```
+
+As with the Principal Component method, our Discriminant models do not handle categorical variables with 3+ classes very well, so we have to manually create our own ummy variables.
+
+```{r recodeFactors}
+# Starting with the mar variables. Our categories are:
+#   Divorced
+df$divorced[df$mar == "D"] <- 1
+df$divorced[df$mar != "D"] <- 0
+
+#   Married
+df$married[df$mar == "M"] <- 1
+df$married[df$mar != "M"] <- 0
+
+#   Separated
+df$separated[df$mar == "S"] <- 1
+df$separated[df$mar != "S"] <- 0
+
+#   Widowed
+df$widowed[df$mar == "W"] <- 1
+df$widowed[df$mar != "W"] <- 0
+
+#   And, by default, an observation is Never Married.
+df <- select(df, -mar)
+
+# Next, we create variables for our Mortgage classes.
+#   Owns a property with a Mortgage.
+df$has_mortgage[df$mortgage == "M"] <- 1
+df$has_mortgage[df$mortgage != "M"] <- 0
+
+#   Renting a property.
+df$renting[df$mortgage == "R"] <- 1
+df$renting[df$mortgage != "R"] <- 0
+
+#   By default, an observation owns a property and has no mortgage.
+df <- select(df, -mortgage)
+
+# Next, we look at our education variables. Their classes are
+#   High School degree with some College.
+df$less_college[df$edu == "<C"] <- 1
+df$less_college[df$edu != "<C"] <- 0
+
+#   College degree.
+df$college[df$edu == "C"] <- 1
+df$college[df$edu != "C"] <- 0
+
+#   High School Degree.
+df$highsch[df$edu == "HS"] <- 1
+df$highsch[df$edu != "HS"] <- 0
+
+#   By default, an observation has less than a high school education.
+df <- select(df, -edu)   # Default: <HS
+
+# Next, we look at our sex variable.
+# For our purposes, a 1 represents Female.
+df$sex[df$sex == "F"] <- 1
+# A 0 represents a male.
+df$sex[df$sex == "M"] <- 0
+
+df$sex <- as.integer(df$sex)   # Validate data type.
+
+# Last, we examine our Race Variable. Our classes are:
+#   Asian
+df$race_asian[df$race == "A"] <- 1
+df$race_asian[df$race != "A"] <- 0
+
+#   Black
+df$race_black[df$race == "B"] <- 1
+df$race_black[df$race != "B"] <- 0
+
+#   Other
+df$race_other[df$race == "O"] <- 1
+df$race_other[df$race != "O"] <- 0
+
+#   By default, an observation is white.
+df <- select(df, -race)
+
+# Check the end result of our process.
+head(df)
+```
+
+For this model, we also want to split our data into a training, a test, and a validation set. Our training set will be a 50% split of our data used to create our discriminant model, our validation set will be 30% of our total data used to make adjustments to your training model, and the test set will be the remaining 20% of our data, used to create our confusion matrix.
+
+We will set a seed in our R code to get consistent samples from our data. We define our samples as follows.
+
+```{r sampleData}
+set.seed(42)   # Assure that we get consistent samples when running the code.
+
+# Create an index row to sample from.
+df$sample <- 1:nrow(df)
+
+s_vec <- c()   # Create a vector to hold sampled observation indexes in.
+
+# For our analysis, we want to balance the percent of aid, poor, and no group
+# observations there are relative to their proportions in the full data set.
+
+for (i in c("aid", "poor", "no")) {
+  # Here, for each class of Group, we sample 50% of the observations.
+  
+  s_vec <- c(s_vec, 
+             sample(df$sample[df$group == i], 
+                    round(length(df$sample[df$group == i])*0.5)))
+}
+
+# Label all sampled observations "train"
+df$sample[as.integer(s_vec)] <- "train"
+
+
+# Next, we repeat the above process to create a 30% Validation set.
+# The main difference here is that we filter out values labeled train.
+# From the remaining data, we will take 60% to make our validation set.
+
+# Create an object that does not contain any training observations.
+# For this object, we only need the group and sample columns to sample from.
+no_train <- df |>
+  filter(sample != "train") |>   # Remove all train values.
+  select(group, sample)   # Select necessary columns.
+
+s_vec <- c()   # Reset our sampling vector.
+
+for (i in c("aid", "poor", "no")) {
+  # Here, for each class of Group, we sample 60% of the observations.
+  
+  s_vec <- c(s_vec, 
+             sample(no_train$sample[no_train$group == i], 
+                    round(length(no_train$sample[no_train$group == i])*0.6)))
+}
+
+# Label all observations in the validation set.
+df$sample[as.integer(s_vec)] <- "val"
+
+# Everything else goes to Testing Set. 
+df$sample[(df$sample != "train")&(df$sample!="val")] <- "test"
+
+# Clean up the variables we don't need anymore.
+rm(s_vec)
+rm(no_train)
+
+# Print Train, Test, and Validation sizes.
+print(paste("Train Size:", length(df$sample[df$sample == "train"])))
+print(paste("Test Size:", length(df$sample[df$sample == "test"])))
+print(paste("Validation Size:", length(df$sample[df$sample == "val"])))
+```
+
+Next, we create our sample data frames.
+
+```{r divideSamples}
+# Select training observations.
+train_df <- df |>
+  filter(sample == "train") |>
+  select(-sample)
+
+# Select validation observations.
+val_df <- df |>
+  filter(sample == "val") |>
+  select(-sample)
+
+# Select testing observations.
+test_df <- df |>
+  filter(sample == "test") |>
+  select(-sample)
+
+# We can now delete the full data set.
+rm(df)
+```
+
+
+We will construct 4 Discriminant models to analyze our data. The first two will be linear discriminant models, and the other two will be quadratic discriminant models. The difference between each pair of models is whether we balance the prior probabilities of our classes, basically determining whether we allow for bias based on the size of the class.
+
+### Linear Discriminant Analysis
+
+We will start with the model that uses the prior probabilities. This means that this model will prefer to predict classes with more observations. In our case, we would expect the model to prefer the "no" group over the other two.
+
+```{r baseLDA}
+# Train our model
+lda_tr <- lda(group~., data=train_df)
+lda_tr   # View our results.
+```
+
+As a basic rundown, we first see our prior probabilities and variable means by class. These are fairly basic statistics, but it tells us interesting features like the fact that the aid group is on average younger than the other two.
+
+More importantly, we see our two linear discriminant coefficients. Our model uses the Aid group as the default group, so our two sets of coefficients tell whether an observation should be of the No or Poor group, respectively.
+
+For each coefficient, positive values suggest that the Class of the discriminant typically have larger values than the aid group for that variable. Negative values suggest the class has smaller values of that variable than the aid group.
+
+We can see that this model is rather strange. From the top, we know that the Aid group should generally be younger based on its mean, but the Poor group is shown having a slight tendency toward being younger in this model. While standard deviations could factor into this, it seems unreasonable given that the no group's coefficient suggests it is older.
+
+The model also seems to suggest that the no group is the most likely to be female due to its positive coefficient for the sex variable, but our exploratory analysis has shown this to not be the case. This model also suggests that the aid group has the highest income, which should theoretically be incorrect because they are earning subsidies. And looking at our race variables, they suggest that the aid group is the most likely to be white, when we know that the no group is the least diverse of the three.
+
+We can pick these coefficients apart quite a bit, but for now, we will move on to validating our results. To do this, we will compare the coefficients of a model trained on the validation set to our results.
+
+```{r baseLDAVal}
+# Output the values of our validation model.
+lda(group~., data=val_df)
+```
+
+Generally speaking, in this model, we seem to be getting similar values to the model created from the training set. We do not see that many sign flips comparing our two models. The main differences we are seeing are in specific coefficient values, which we would expect some variation in due to the slight variation in our data.
+
+Now that we have validated our data, we can see how well it works on our testing set. We will start by creating a confusion matrix of predicted values.
+
+```{r baseLDATestMat}
+# Create predictions of the Groups in our test data.
+lda_ts <- predict(lda_tr, test_df)
+
+# Compute a confusion matrix to show our results.
+lda_conf <- table(test_df$group, lda_ts$class)
+lda_conf
+```
+
+In the above table, our rows represent our true values, and our columns represent our predicted values. We see that, of our aid group observations, nearly half were misclassified into the no group, whereas only about a tenth were misclassified into the poor group. Similarly, for the no group, about 3 times as many observations were misclassified as aid compared to those misclassified as poor. This would initially seem to suggest that the aid and no groups are the most similar.
+
+```{r baseLDATestScore}
+# Calculate the accuracy of our class predictions.
+print(paste("Accuracy:", mean(test_df$group == lda_ts$class)))
+
+# Calculate the recall and precision related to the Aid Group.
+recl_lda <- lda_conf[1, 1]/(lda_conf[1,1] + lda_conf[1,2] + lda_conf[1,3])
+prci_lda <- lda_conf[1, 1]/(lda_conf[1,1] + lda_conf[2,1] + lda_conf[3,1])
+
+# Print out all metrics.
+print(paste("Recall:", recl_lda))
+print(paste("Precision:", prci_lda))
+print(paste("F1:", 2*recl_lda*prci_lda/(recl_lda + prci_lda)))
+```
+
+Quantitatively, we can view the performance of our model. We see that, even though the accuracy is doing very well, its performance at predicting the aid group is actually quite poor. The F1 score calculated based on that class is approximately 56%, which is just slightly better than a coin flip. It appears that the prior probability of the no group is greatly dampening our ability to predict our other classes.
+
+#### LDA with Balanced Priors.
+
+Our next step is to make a slight modification to the lda algorithm and use balanced prior probabilities to ignore the effects of sample proportions in our model's prediction.
+
+```{r balancedLDA}
+# Train our model
+ldab_tr <- lda(group~., data=train_df, prior=c(1,1,1)/3)
+ldab_tr   # View our results.
+```
+
+Comparing this to our earlier model, we see some changes to our coefficients. At the top, we now see that the model identifies the aid group as the youngest of our classes, which seems more reasonable to what we know of the data. Additionally, the model now suggests that the aid group is the most male overall, which is still not what we expect. This model also suggests that the aid group receives the greatest medicare part b funds, which seems suspicious given that it is supposed to be the youngest group.
+
+Something we saw earlier but hadn't commented on is that this model both suggests that the aid group has the least resources but greatest income of our classes, which probably suggests that multicollinearity in those variables is altering our results. 
+
+The coefficients of this model still do not seem to make the most sense. Next, we will validate our data to make sure that we are finding the best results.
+
+```{r balancedLDAVal}
+# Output the values of our validation model.
+lda(group~., data=val_df, prior=c(1,1,1)/3)
+```
+
+Once again, we see that we are calculating coefficients that are very similar to the initial model. Our model is at least consistently representing our data.
+
+```{r balancedLDATestMat}
+ldab_ts <- predict(ldab_tr, test_df)
+
+ldab_conf <- table(test_df$group, ldab_ts$class)
+ldab_conf
+```
+
+Looking at our correlation matrix, we now see that we are correctly classifying the aid and poor groups more accurately, though we have seen a drop in correct no group classifications. Even with our balanced sample probabilities, we are still seeing more misclassifications of the aid group into the no group than we are into the poor group. We also see the no group misclassified more frequently into the aid group.
+
+Interestingly, the poor group is being misclassified more frequently into the no group than the aid group. This continues to drive the idea that the aid and poor groups are not reliably all that similar.
+
+```{r balancedLDATestScore}
+print(paste("Accuracy:", mean(test_df$group == ldab_ts$class)))
+
+recl_ldab <- ldab_conf[1, 1]/(ldab_conf[1,1] + ldab_conf[1,2] + ldab_conf[1,3])
+prci_ldab <- ldab_conf[1, 1]/(ldab_conf[1,1] + ldab_conf[2,1] + ldab_conf[3,1])
+
+print(paste("Recall:", recl_ldab))
+print(paste("Precision:", prci_ldab))
+print(paste("F1:", 2*recl_ldab*prci_ldab/(recl_ldab + prci_ldab)))
+```
+
+Looking at our scoring metrics, we see that we have improved our classification of the no group. We can say that this model better represents that class in our data set.
+
+Next, we will repeat this process with a quadratic discriminant instead of the linear.
+
+### Quadratic Discriminant Analysis
+
+Again, we will start with the QDA model that uses the prior probabilities. 
+
+```{r baseQDA}
+# Train our model
+qda_tr <- qda(group~., data=train_df)
+qda_tr   # View our results.
+```
+
+Because of the quadratic nature of the model, we cannot actually output the coefficients of it. This means that we cannot actually validate the model and must move on to the test phase of our research.
+
+```{r baseQDATestMat}
+# Create predictions of the Groups in our test data.
+qda_ts <- predict(qda_tr, test_df)
+
+# Compute a confusion matrix to show our results.
+qda_conf <- table(test_df$group, qda_ts$class)
+qda_conf
+```
+
+As shown in our correlation matrix, we are doing a very good job of classifying the aid group and the no group compared to our previous models. However, we are now doing quite a bit worse at classifying the poor group, especially compared to the balanced linear discriminant model.
+
+Interestingly, we are seeing the most misclassification of the aid group into the poor group even though the no group has such a large prior probability. However, the poor group is being misclassified more frequently into the no group. This is interesting, but perhaps not surprising due to the aforementioned large prior probability of the no group. It might be interesting to see how this changes when we balance the priors.
+
+```{r baseQDATestScore}
+# Calculate the accuracy of our class predictions.
+print(paste("Accuracy:", mean(test_df$group == lda_ts$class)))
+
+# Calculate the recall and precision related to the Aid Group.
+recl_qda <- qda_conf[1, 1]/(qda_conf[1,1] + qda_conf[1,2] + qda_conf[1,3])
+prci_qda <- qda_conf[1, 1]/(qda_conf[1,1] + qda_conf[2,1] + qda_conf[3,1])
+
+# Print out all metrics.
+print(paste("Recall:", recl_qda))
+print(paste("Precision:", prci_qda))
+print(paste("F1:", 2*recl_qda*prci_qda/(recl_qda + prci_qda)))
+```
+
+As mentioned, we see that we are doing much better at classifying the aid group with this model. It is rather unfortunate that we cannot view the coefficients. However, the quadratic model itself suggests that our groups do not share a common variance structure.
+
+#### QDA with Balanced Priors.
+
+Now, we will test the QDA model with balanced prior probabilities.
+
+```{r balancedQDA}
+# Train our model
+qdab_tr <- qda(group~., data=train_df, prior=c(1,1,1)/3)
+qdab_tr   # View our results.
+```
+
+Once again, we cannot view our coefficients, so we will move directly to our cross validation.
+
+```{r balancedQDATestMat}
+qdab_ts <- predict(qdab_tr, test_df)
+
+qdab_conf <- table(test_df$group, qdab_ts$class)
+qdab_conf
+```
+
+Our results are not all that different to what we saw with the initial QDA model. However, the classification for both the no and poor groups has improved, with very slight losses in our classification of the aid group. 
+
+We are still seeing that the aid group is misclassified most frequently into the poor group, which is a very fascinating result given what we've seen so far. However, the poor group is still being misclassified 9x as frequently into the no group as it is misclassified into the aid group. If this model could show a relationship between the two groups, we would expect it to work both ways.
+
+```{r balancedQDATestScore}
+print(paste("Accuracy:", mean(test_df$group == qdab_ts$class)))
+
+recl_qdab <- qdab_conf[1, 1]/(qdab_conf[1,1] + qdab_conf[1,2] + qdab_conf[1,3])
+prci_qdab <- qdab_conf[1, 1]/(qdab_conf[1,1] + qdab_conf[2,1] + qdab_conf[3,1])
+
+print(paste("Recall:", recl_qdab))
+print(paste("Precision:", prci_qdab))
+print(paste("F1:", 2*recl_qdab*prci_qdab/(recl_qdab + prci_qdab)))
+```
+
+Finally, looking at the scores of this model, we see that, despite the fact our specific F1 has dropped, we now have the highest accuracy of any of our models, which may suggest that this is the best model for representing our data.
+
+
+
+
+
+
+
