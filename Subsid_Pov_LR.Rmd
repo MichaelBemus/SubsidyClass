@@ -1,0 +1,299 @@
+---
+title: "Poverty Data - Logistic Regression"
+author: "Michael Bemus"
+date: "2024-10-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+The last method we will use to assess the group structure of our data is logistic regression. Logistic regression is a classification method which relies on the logit function to assign probabilities of an observation being in a given class. In the case of multinomial regression, this method creates a model for each class other than the base class- which for our analysis will be the aid group. It then compares the probabilities of all outputs and concludes a given class.
+
+### Load Data
+
+```{r loadData}
+df <- read.csv("SubsidyClass/dataset.csv")
+```
+
+```{r loadLibraries, include=FALSE}
+library(ggplot2)
+library(glmnet)
+library(nnet)
+library(MASS)
+library(forcats)
+library(gridExtra)
+library(dplyr)
+```
+
+For this analysis, we finally get to leverage factor data in our model. While logistic regression still does transform variables with 3+ levels into dummy variables, the functions we use will do this automatically, simplifying our processes.
+
+First, we need to drop the extra columns that we have not been using in our analysis.
+
+```{r removeVars}
+df <- select(df, -X, -st, -off_pov, -spm_pov, -snap, -house_sub, -slunch, 
+             -energy, -wic)   # Remove unnecessary variables.
+```
+
+Next, we redefine our categorical variables as factors.
+
+```{r catToFactor}
+# Convert all character and binary columns to factors.
+df$sex <- factor(df$sex)
+df$mar <- factor(df$mar)
+df$hispanic <- factor(df$hispanic)
+df$race <-factor(df$race)
+df$edu <- factor(df$edu)
+df$ui_kids <- factor(df$ui_kids)
+df$mortgage <- factor(df$mortgage)   
+
+# For group, we want to relevel to assure that it is the base class for our
+# Logistic model.
+df$group <- factor(df$group)
+df$group <- relevel(df$group, "aid")
+```
+
+For our last preprocessing step, we need to break our data into training, testing, and validation samples. We will use the same exact sampling method as we did with the discriminant analysis model.
+
+```{r sampleData}
+set.seed(42)   # Assure that we get consistent samples when running the code.
+
+# Create an index row to sample from.
+df$sample <- 1:nrow(df)
+
+s_vec <- c()   # Create a vector to hold sampled observation indexes in.
+
+# For our analysis, we want to balance the percent of aid, poor, and no group
+# observations there are relative to their proportions in the full data set.
+
+for (i in c("aid", "poor", "no")) {
+  # Here, for each class of Group, we sample 50% of the observations.
+  
+  s_vec <- c(s_vec, 
+             sample(df$sample[df$group == i], 
+                    round(length(df$sample[df$group == i])*0.5)))
+}
+
+# Label all sampled observations "train"
+df$sample[as.integer(s_vec)] <- "train"
+
+
+# Next, we repeat the above process to create a 30% Validation set.
+# The main difference here is that we filter out values labeled train.
+# From the remaining data, we will take 60% to make our validation set.
+
+# Create an object that does not contain any training observations.
+# For this object, we only need the group and sample columns to sample from.
+no_train <- df |>
+  filter(sample != "train") |>   # Remove all train values.
+  select(group, sample)   # Select necessary columns.
+
+s_vec <- c()   # Reset our sampling vector.
+
+for (i in c("aid", "poor", "no")) {
+  # Here, for each class of Group, we sample 60% of the observations.
+  
+  s_vec <- c(s_vec, 
+             sample(no_train$sample[no_train$group == i], 
+                    round(length(no_train$sample[no_train$group == i])*0.6)))
+}
+
+# Label all observations in the validation set.
+df$sample[as.integer(s_vec)] <- "val"
+
+# Everything else goes to Testing Set. 
+df$sample[(df$sample != "train")&(df$sample!="val")] <- "test"
+
+# Clean up the variables we don't need anymore.
+rm(s_vec)
+rm(no_train)
+
+# Print Train, Test, and Validation sizes.
+print(paste("Train Size:", length(df$sample[df$sample == "train"])))
+print(paste("Test Size:", length(df$sample[df$sample == "test"])))
+print(paste("Validation Size:", length(df$sample[df$sample == "val"])))
+```
+
+And now we'll divide our samples into separate data frames.
+
+```{r divideSamples}
+# Select training observations.
+train_df <- df |>
+  filter(sample == "train") |>
+  select(-sample)
+
+# Select validation observations.
+val_df <- df |>
+  filter(sample == "val") |>
+  select(-sample)
+
+# Select testing observations.
+test_df <- df |>
+  filter(sample == "test") |>
+  select(-sample)
+
+# We can now delete the full data set.
+rm(df)
+```
+
+### Training Logistic Model
+
+Now that we have split our data, we can begin training our model.
+
+```{r trainModel}
+# This function comes from the nnet package. Like in most logistic regressions,
+# it uses gradient descent to find the optimal values for our data. However,
+# because the training set is so large, it can take a very long time to fully
+# converge. For this reason, we have set our max iterations to 250.
+
+log_mod <- multinom(group~., data=train_df, maxit=250)
+```
+
+The above output shows the deviance we have remaining in the model as we train it on further iterations. We see that, a bit after completing 220 iterations, our model converged with a total deviance of about 101,117. We see that, by the time we reached 180 iterations, we really were not seeing huge gains in the removal of deviance. It is good to see that the model converged within 250 iterations.
+
+Validation for this model will be very important because we have only found a relative minimum in the possible deviance of our model. By running this same method on a different set of data, we can make sure that the coefficients we find are accurate.
+
+```{r modelOutput}
+# We want to store this because it takes a good minute to run.
+train_sum <- summary(log_mod)
+train_sum
+```
+
+Similarly to our discriminant models, we see two sets of coefficients, one for the no group and one for the poor group. These coefficients are found in a linear regression function within the logit function itself. Positive coefficients correspond with a stronger positive correlation to the model's corresponding group. Negative coefficients correspond with a stronger positive correlation to the aid group.
+
+To find the relative effect of these coefficients, we must take the exponential of each.
+
+```{r modelRelativeRisk}
+# Take the exponential of all of our coefficients.
+t(exp(train_sum$coefficients))
+```
+
+Generally, values greater than 1 suggest that the variable is more positively correlated with the corresponding category than it is to the aid group. If it is less than 1, the variable is more positively correlated to the aid group.
+
+The relative effect of these values are multipliers to the value of a coefficient. So, for example, for each 1 point of age, the model is 0.9917587 times less likely to be of the no group and 1.0005137 times more likely to be of the poor group, both compared to the aid group.
+
+With these coefficients, we can see a few interesting trends. First, this model implies that the aid group is the least likely to be married, which seems strange due to the fact that we believe the aid group to generally represent families with children in school. This model also implies that the poor group is the most likely to have children, which is the opposite of what we were seeing in our visualizations.
+
+Many of our numeric variables have very small effects. This is because their scale is so much greater than the scale of the other variables. If we were to normalize their values, we might see somewhat different results.
+
+We see that this model implies that the aid group has the highest state tax, total expenses, out of pocket medical costs, and total resources.
+
+For many of our financial variables, it appears as though the poor group is most similar to the aid group, but there could very well be multicolinearity playing into those estimates.
+
+What might be useful would be seeing which variables are significant to this model. To determine this, we must compute p-values as follows.
+
+```{r modelPVal}
+mlog_pvals <- function(log_sum) {
+  # We want to input the log-model summary into this function.
+  # First, we normalize our coefficients by dividing them by their standard
+  # errors.
+  # Then, we compute a normal probability of whether the value is non-zero.
+  
+  z <- log_sum$coefficients/log_sum$standard.errors
+  p <- (1 - pnorm(abs(z), 0, 1)) * 2
+  return(p)
+}
+
+# Run the above function on our model.
+mlog_pvals(train_sum)
+```
+
+In the above, anything with value greater than 0.05 is not significant. We see that many of our values 0 out because their p-values are so small. In the end, we see that only wk_xpen and cc_xpen are insignificant to both models. For our sub=models, we see, hi_prem is insignificant to the no group model. Age, MOOP, and Cap_Xpen are also insignificant for the poor group model.
+
+Because the poor group has more insignificant variables, it may suggest that the poor group is more similar to the aid group. However, we will rely on our cross validation to make any final conclusions.
+
+### Validating Logistic Model
+
+Before we run our final tests, we want to see whether we get similar coefficients using the validation set to train the data. This model should hopefully be faster to train because it has less data.
+
+```{r valModel}
+val_mod <- multinom(group~., data=val_df, maxit=250)
+```
+
+We see that our data starts with almost half the deviance of the training set, which is reasonable due to the fact that it has less data. However, due to the number of variables in our model, it still took about the same number of iterations to find a convergence point in the deviance. 
+
+```{r valOutput}
+# Get the coefficients of the validation model.
+val_sum <- summary(val_mod)
+val_sum
+```
+
+We have a lot of coefficients, so in this format, it is hard to compare our models. Placing them side-by-side...
+
+```{r compareModels}
+comp_out <- t(rbind(train_sum$coefficients[1,], val_sum$coefficients[1,], 
+                    train_sum$coefficients[2,], train_sum$coefficients[2,]))
+colnames(comp_out) <- c("no-Train", "no-Val", "poor-Train", "poor-Val")
+comp_out
+```
+
+Comparing the models in this way, we do not see much difference between the coefficients of the poor group. 
+
+However, the coefficients for the no group are somewhat different. We see sign changes for wk_xpen, which we know was insignificant and therefore not too troublesome, and education-College, which was significant to the model. We also see noticeable changes of magnitude in ui_kids1, spm_hi_prem, cc_xpen, hi_prem, hispanic, raceO, eduHS, edu<HS, marW, marNM, and age. 
+
+Because we have seen more changes in the no group, this might suggest that the discernible differences between it and the aid group are weaker, which would imply they are more similar. However, we will still rely on our cross validation to come to a final conclusion.
+
+### Testing Model
+
+Now, we will see how accurately we can predict the test data, and how misclassification typically occurs.
+
+```{r testConfusion}
+# Create predictions of the Groups in our test data.
+log_pred <- predict(log_mod, test_df)
+
+# Compute a confusion matrix to show our results.
+log_conf <- table(test_df$group, log_pred)
+log_conf
+```
+
+These results are very interesting. Generally, the accuracy of this model seems pretty good. We have only misclassified 14,026 out of our 402,195 observations, which gives us an accuracy above 95%. It is a fairly impressive result.
+
+More interesting, though, is that the aid group and the no group did not misclassify into each other very frequently. Both misclassified into the poor group much more frequently, with the no group only misclassifying into the aid group once. According to the logic we have been using, this would suggest there is a very fine line between the aid and the no groups.
+
+For the poor group, we see that it misclassifies more frequently into the no group. This could be a result of the sample size of the no group biasing which group should be the most frequent. We see that the poor group is classified the worst out of our classes, but the result is still better than what we saw with our discriminant analysis.
+
+```{r testScore}
+# Calculate the accuracy of our class predictions.
+print(paste("Accuracy:", mean(test_df$group == log_pred)))
+
+# Calculate the recall and precision related to the Aid Group.
+recl_log <- log_conf[1, 1]/(log_conf[1,1] + log_conf[1,2] + log_conf[1,3])
+prci_log <- log_conf[1, 1]/(log_conf[1,1] + log_conf[2,1] + log_conf[3,1])
+
+# Print out all metrics.
+print(paste("Recall:", recl_log))
+print(paste("Precision:", prci_log))
+print(paste("F1:", 2*recl_log*prci_log/(recl_log + prci_log)))
+```
+
+Our test scores show that we could be doing somewhat better predicting the aid group itself, but we are not misclassifying into it very frequently at all. The fact that our F1 score is greater than 95% is very promising for us in terms of the applicability of this predictive model.
+
+Generally, the results of this model have thrown somewhat of a curveball into our overall analysis. The PCA method seemed to suggest the aid group was more similar to the no group, and the Discriminant Method gave us somewhat muddled results as far as the mutual relationships between the groups were concerned. Now, this model has swung all the way to the other side, seeming to show that the aid group is most similar to the poor group.
+
+We see that these predictive models are perhaps not the best for determining whether a certain group should exist through this direct classification method. However, there are certainly other methods we could try, such as removing classes to see how the models change or rebalancing the sample sizes of each of our groups.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
